@@ -470,9 +470,11 @@ class LogoAnimation(Scene):
 
                 dot_radius = self.dot_min_spacing * self.dot_radius_ratio
 
-                dot.set_radius(dot_radius * (1 - pulse_value * 0.5))
+                # Dot.radius is only metadata here; the visible size changes when the points are rescaled.
+                target_radius = max(dot_radius * (1 - pulse_value * 0.3), 1e-4)
+                dot.scale_to_fit_width(target_radius * 2)
+                dot.radius = target_radius
                 dot.move_to(np.array([new_pos_x, new_pos_y, 0]))
-                pass
 
         dot_field.add_updater(update_dots)
         self.play(
