@@ -8,3 +8,6 @@ dependencies = [
     "manim>=0.20.1",
     "svgelements>=1.9.6",
 ]
+
+[tool.black]
+line-length = 119

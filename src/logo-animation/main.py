@@ -5,9 +5,8 @@ from typing import cast
 import numpy as np
 from manim import (
     Create,
-    CubicBezier,
+    LaggedStart,
     ManimColor,
-    ParametricFunction,
     VMobject,
     Scene,
     SVGMobject,
@@ -46,38 +45,38 @@ class LogoAnimation(Scene):
     highlight_stroke_width = 12
     fit_width_ratio = 0.74
     fit_height_ratio = 0.72
-    length_time_ratio = 0.05
+    length_time_ratio = 0.1
 
     def construct(self):
         drawable_segments = self._load_segments()
 
+        vgroup = VGroup(*[spec.mobject for spec in drawable_segments])
+        mobjects = []
         for segment_spec in drawable_segments:
             mobject = segment_spec.mobject
-            mobject.set_stroke(
-                color=self.construction_color, width=self.construction_stroke_width
-            )
+            mobject.set_stroke(color=self.construction_color, width=self.construction_stroke_width)
             mobject.set_fill(opacity=0)
-            self.play(
-                Create(mobject),
-                run_time=segment_spec.time,
-                rate_func=rate_functions.ease_in_out_sine,
-            )
+            mobjects.append(Create(mobject, run_time=segment_spec.time))
+
+        self.play(
+            LaggedStart(*mobjects, lag_ratio=0.3),
+            run_time=5,
+            rate_func=rate_functions.ease_in_out_sine,
+        )
 
         filled_logo = self._build_filled_logo()
         self.add(filled_logo)
         self.play(
             filled_logo.animate.set_fill(opacity=self.fill_opacity),
+            vgroup.animate.set_stroke(opacity=0),
             run_time=0.55,
             rate_func=rate_functions.ease_in_out_sine,
         )
-
         self.wait(2)
 
     def _load_segments(self) -> list[SegmentSpec]:
         svg = SVG.parse(str(self.asset_path))
-        paths: list[SvgPath] = [
-            element for element in svg.elements() if isinstance(element, SvgPath)
-        ]
+        paths: list[SvgPath] = [element for element in svg.elements() if isinstance(element, SvgPath)]
         if not paths:
             raise ValueError(f"No SVG paths found in {self.asset_path}")
 
@@ -133,23 +132,48 @@ class LogoAnimation(Scene):
     def _build_segment_spec_line(self, segment: Line):
         start_point = self._scene_point(segment.start)
         end_point = self._scene_point(segment.end)
-        line_mobject = VMobject()
-
-        # We want the start and end points to be outside of the frame to create a for this we find
-        # the intersection of the line with the bounding box of the frame and then we build a new
-        # line that starts and ends at the intersection points. This way we can create a
-        # "stretching" effect where the line grows from the center of the frame to the outside.
         direction = end_point - start_point
-        if np.linalg.norm(direction) == 0:
+        length = float(np.linalg.norm(direction))
+        if np.isclose(length, 0.0):
             return None
-        
-        
 
-        length = float(np.linalg.norm(end_point - start_point))
+        # Extend the line until it intersects both sides of the frame.
+        frame_x_radius = config.frame_width / 2
+        frame_y_radius = config.frame_height / 2
+        tolerance = 1e-6
+        intersections = []
 
-        return SegmentSpec(
-            segment=segment, mobject=line_mobject, time=length * self.length_time_ratio
-        )
+        if not np.isclose(direction[0], 0.0):
+            for x in (-frame_x_radius, frame_x_radius):
+                scale = (x - start_point[0]) / direction[0]
+                candidate = start_point + direction * scale
+                if -frame_y_radius - tolerance <= candidate[1] <= frame_y_radius + tolerance:
+                    intersections.append(candidate)
+
+        if not np.isclose(direction[1], 0.0):
+            for y in (-frame_y_radius, frame_y_radius):
+                scale = (y - start_point[1]) / direction[1]
+                candidate = start_point + direction * scale
+                if -frame_x_radius - tolerance <= candidate[0] <= frame_x_radius + tolerance:
+                    intersections.append(candidate)
+
+        unique_intersections = []
+        for candidate in intersections:
+            if not any(np.allclose(candidate, existing) for existing in unique_intersections):
+                unique_intersections.append(candidate)
+
+        chosen_start, chosen_end = start_point, end_point
+        line_mobject = VMobject()
+        if len(unique_intersections) >= 2:
+            unique_intersections.sort(key=lambda candidate: np.dot(candidate[:2] - start_point[:2], direction[:2]))
+            chosen_start, chosen_end = unique_intersections[0], unique_intersections[-1]
+        else:
+            chosen_start, chosen_end = start_point, end_point
+
+        line_mobject.set_points_as_corners([chosen_start, chosen_end])
+
+        length = float(np.linalg.norm(chosen_end - chosen_start))
+        return SegmentSpec(segment=segment, mobject=line_mobject, time=length * self.length_time_ratio)
 
     def _build_segment_spec_cubic_bezier(self, segment: SvgCubicBezier):
         start_point = self._scene_point(segment.start)
@@ -161,17 +185,15 @@ class LogoAnimation(Scene):
         mobject = VMobject()
         mobject.add_cubic_bezier_curve(start_point, control1, control2, end_point)
         return SegmentSpec(
-            segment=segment, mobject=mobject, time=length * self.length_time_ratio
+            segment=segment,
+            mobject=mobject,
+            time=max(length * self.length_time_ratio, 0.04),
         )
 
     def _scene_point(self, svg_point):
         x = (float(svg_point.x) - self.svg_center[0]) * self.svg_scale
         y = -(float(svg_point.y) - self.svg_center[1]) * self.svg_scale
         return np.array([x, y, 0.0])
-
-    def _create_animation(self, stretched_segment, scaled_length):
-        run_time = float(np.clip(0.12 + scaled_length * 0.08, 0.18, 0.5))
-        return Create(stretched_segment, run_time=run_time)
 
     def _build_filled_logo(self):
         filled_logo = SVGMobject(str(self.asset_path))
