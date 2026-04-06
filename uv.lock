@@ -183,10 +183,14 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "manim" },
+    { name = "svgelements" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "manim", specifier = ">=0.20.1" }]
+requires-dist = [
+    { name = "manim", specifier = ">=0.20.1" },
+    { name = "svgelements", specifier = ">=1.9.6" },
+]
 
 [[package]]
 name = "manim"
