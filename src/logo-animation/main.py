@@ -246,6 +246,7 @@ class LogoAnimation(Scene):
             if not np.allclose(start_point, end_point)
         ]
 
+        dot_radius = dot_spacing * self.dot_radius_ratio
         dots = VGroup()
         home_positions = []
         x_values = np.arange(min_x, max_x + dot_spacing, dot_spacing)
@@ -255,10 +256,10 @@ class LogoAnimation(Scene):
             row_offset = dot_spacing * 0.5 if row_index % 2 else 0.0
             for x in x_values + row_offset:
                 point = np.array([x, y, 0.0], dtype=float)
-                if not self._point_is_inside_logo(point, edges):
+                if not self._point_is_inside_logo(point, dot_radius, edges):
                     continue
 
-                dot = Dot(point=point, radius=dot_spacing * self.dot_radius_ratio, color=self.fill_color)
+                dot = Dot(point=point, radius=dot_radius, color=self.fill_color)
                 dot.set_stroke(width=0, opacity=0)
                 dot.set_z_index(1)
                 dots.add(dot)
@@ -337,13 +338,20 @@ class LogoAnimation(Scene):
 
         return []
 
-    def _point_is_inside_logo(self, point: np.ndarray, edges: list[tuple[np.ndarray, np.ndarray]]) -> bool:
+    def _point_is_inside_logo(
+        self,
+        point: np.ndarray,
+        radius: float,
+        edges: list[tuple[np.ndarray, np.ndarray]],
+    ) -> bool:
         intersections = 0
         x, y = point[:2]
+        min_edge_distance = float("inf")
 
         for start_point, end_point in edges:
             x1, y1 = start_point[:2]
             x2, y2 = end_point[:2]
+            min_edge_distance = min(min_edge_distance, self._distance_point_to_segment(point, start_point, end_point))
 
             if np.isclose(y1, y2):
                 continue
@@ -354,7 +362,23 @@ class LogoAnimation(Scene):
             if intersection_x >= x:
                 intersections += 1
 
-        return intersections % 2 == 1
+        return intersections % 2 == 1 and min_edge_distance >= radius
+
+    def _distance_point_to_segment(
+        self,
+        point: np.ndarray,
+        start_point: np.ndarray,
+        end_point: np.ndarray,
+    ) -> float:
+        segment = end_point - start_point
+        segment_length_squared = float(np.dot(segment[:2], segment[:2]))
+        if np.isclose(segment_length_squared, 0.0):
+            return float(np.linalg.norm(point[:2] - start_point[:2]))
+
+        projection = float(np.dot(point[:2] - start_point[:2], segment[:2]) / segment_length_squared)
+        clamped_projection = np.clip(projection, 0.0, 1.0)
+        closest_point = start_point[:2] + clamped_projection * segment[:2]
+        return float(np.linalg.norm(point[:2] - closest_point))
 
     def _play_logo_dot_wave(
         self,
