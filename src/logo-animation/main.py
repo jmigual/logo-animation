@@ -33,6 +33,19 @@ from svgelements import (
 config.background_color = ManimColor("#f7f2e7")
 
 
+def _sync_frame_aspect_with_resolution() -> None:
+    """Keep the scene's logical frame aligned with the requested pixel resolution."""
+    pixel_width = float(config.pixel_width)
+    pixel_height = float(config.pixel_height)
+    if np.isclose(pixel_width, 0.0) or np.isclose(pixel_height, 0.0):
+        return
+
+    config.frame_width = config.frame_height * (pixel_width / pixel_height)
+
+
+_sync_frame_aspect_with_resolution()
+
+
 @dataclass(frozen=True)
 class SegmentSpec:
     segment: object
@@ -49,10 +62,11 @@ class LogoAnimation(Scene):
     final_stroke_width = 5
     construction_stroke_width = 2
     highlight_stroke_width = 12
-    fit_width_ratio = 0.74
-    fit_height_ratio = 0.72
+    fit_width_ratio = 0.9
+    fit_height_ratio = 0.9
     length_time_ratio = 0.1
-    dot_min_spacing = 0.1
+    dot_vertical_divisions = 50
+    dot_min_spacing = 0.01
     dot_radius_ratio = 0.4
     dot_radius_floor = 1e-4
     dot_reveal_radius_scale = 4.0
@@ -63,6 +77,8 @@ class LogoAnimation(Scene):
         self.camera.background_color = self.background_color  # type: ignore
 
         drawable_segments = self._load_segments()
+
+        self.dot_min_spacing = max(self.dot_min_spacing, self.svg_frame_height / self.dot_vertical_divisions)
 
         vgroup = VGroup(*[spec.mobject for spec in drawable_segments])
         mobjects = []
@@ -132,10 +148,15 @@ class LogoAnimation(Scene):
         )
         svg_width = max_x - min_x
         svg_height = max_y - min_y
-        self.svg_scale = min(
-            config.frame_width * self.fit_width_ratio / svg_width,
-            config.frame_height * self.fit_height_ratio / svg_height,
-        )
+
+        svg_x_scale = svg_width / config.frame_width
+
+        if svg_height / svg_x_scale > config.frame_height:
+            self.svg_scale = config.frame_height * self.fit_height_ratio / svg_height
+        else:
+            self.svg_scale = config.frame_width * self.fit_width_ratio / svg_width
+
+        self.svg_frame_height = svg_height * self.svg_scale
 
     def _build_segment_spec(self, segment: PathSegment) -> SegmentSpec | None | list[SegmentSpec]:
         if isinstance(segment, Close):
@@ -227,7 +248,7 @@ class LogoAnimation(Scene):
         filled_logo = SVGMobject(str(self.asset_path))
         filled_logo.set_stroke(width=0, opacity=0)
         filled_logo.set_fill(color=self.fill_color, opacity=0)
-        filled_logo.scale_to_fit_height(config.frame_height * self.fit_height_ratio)
+        filled_logo.scale_to_fit_height(self.svg_frame_height)
         filled_logo.move_to(np.array([0, 0, 0]))
         filled_logo.set_z_index(3)
         return filled_logo
