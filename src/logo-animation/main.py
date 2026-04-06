@@ -496,68 +496,42 @@ class LogoAnimation(Scene):
         field_width = dot_field.width
         min_x = np.min(home_positions[:, 0])
         pulse_amplitude = field_width * self.dot_pulse_amplitude
-        pulse_frequency = 2 * np.pi / pulse_amplitude
 
         rotation_offsets = np.random.rand(len(home_positions), 2) * 2 * dot_spacing
-        initial_angles = []
+        initial_angles = np.arctan2(rotation_offsets[:, 1], rotation_offsets[:, 0])
+        rotation_norms = np.linalg.norm(rotation_offsets, axis=1)
 
-        for rotation_offset in rotation_offsets:
-            angle = np.arctan2(rotation_offset[1], rotation_offset[0])
-            initial_angles.append(angle)
-
-        def pulse(pos_x, alpha):
-            rel_x = pos_x - min_x
-
-            alpha_e = alpha * (field_width + pulse_amplitude) / field_width
-            pulse_offset = alpha_e * field_width * 2 * np.pi / pulse_amplitude
-
-            if rel_x < alpha_e * field_width - pulse_amplitude or rel_x > alpha_e * field_width:
-                return 0.0
-
-            return 1 - np.cos(pulse_frequency * rel_x - pulse_offset)
-
-        def pulse2(pos_x, alpha):
-            rel_x = pos_x - min_x
-
-            pulse_offset = alpha * (field_width + pulse_amplitude) / pulse_amplitude - 1
-            x = rel_x / pulse_amplitude - pulse_offset
-            x_clamped = np.clip(x, 0, 1)
-            pulse = rate_functions.ease_in_out_sine(x_clamped)
-
-            return pulse
+        base_radius = self._base_dot_radius()
+        sample_dot = cast(Dot, dot_field.submobjects[0])
+        base_dot_shape = sample_dot.points - sample_dot.get_center()
+        zeros = np.zeros(len(home_positions))
 
         def update_dots(group):
             alpha = progress.get_value()
 
-            for dot, home_point, rotation_offset, initial_angle in zip(
-                group.submobjects,
-                home_positions,
-                rotation_offsets,
-                initial_angles,
-            ):
-                dot: Dot
+            # Vectorized pulse2 + ease_in_out_sine across all dots.
+            rel_x = home_positions[:, 0] - min_x
+            pulse_offset = alpha * (field_width + pulse_amplitude) / pulse_amplitude - 1.0
+            x_clamped = np.clip(rel_x / pulse_amplitude - pulse_offset, 0.0, 1.0)
+            # ease_in_out_sine(t) = (1 - cos(π·t)) / 2; pulse_value = 1 - ease
+            pulse_values = 0.5 + 0.5 * np.cos(np.pi * x_clamped)
 
-                pos_x, pos_y = home_point[:2]
-                pulse_value = 1 - pulse2(pos_x, alpha)
+            # Vectorized there_and_back: triangle wave 0→1→0.
+            tab_values = 2.0 * np.where(pulse_values < 0.5, pulse_values, 1.0 - pulse_values)
 
-                # Implement a swirling effect by rotating around the center of a point chosen at random from the home
-                # positions, with a radius that increases with alpha.
-                radius = np.linalg.norm(rotation_offset) * (1 + rate_functions.there_and_back(pulse_value))
-                angle = initial_angle + pulse_value * 2 * np.pi
+            # Vectorized swirl positions.
+            swing_radii = rotation_norms * (1.0 + tab_values)
+            angles = initial_angles + pulse_values * (2.0 * np.pi)
+            new_x = home_positions[:, 0] + rotation_offsets[:, 0] + swing_radii * np.cos(angles + np.pi)
+            new_y = home_positions[:, 1] + rotation_offsets[:, 1] + swing_radii * np.sin(angles + np.pi)
+            new_centers = np.stack([new_x, new_y, zeros], axis=1)
 
-                center_x = pos_x + rotation_offset[0]
-                center_y = pos_y + rotation_offset[1]
+            # Vectorized scale factors relative to base_radius.
+            scale_factors = np.maximum(1.0 - tab_values * 0.3, self.dot_radius_floor / base_radius)
 
-                offset_x = radius * np.cos(angle + np.pi)
-                offset_y = radius * np.sin(angle + np.pi)
-
-                new_pos_x = center_x + offset_x
-                new_pos_y = center_y + offset_y
-
-                dot_radius = self._base_dot_radius()
-                target_radius = dot_radius * (1 - rate_functions.there_and_back(pulse_value) * 0.3)
-                self._set_dot_radius(dot, target_radius)
-                dot.move_to(np.array([new_pos_x, new_pos_y, 0]))
+            # Update each dot by direct point assignment (avoids move_to + scale_to_fit_width overhead).
+            for dot, sf, center in zip(group.submobjects, scale_factors, new_centers):
+                dot.points = base_dot_shape * sf + center
 
         dot_field.add_updater(update_dots)
         self.play(
