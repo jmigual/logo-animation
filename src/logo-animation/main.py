@@ -45,7 +45,7 @@ class LogoAnimation(Scene):
     construction_color = "#808080"
     fill_color = "#E1E1E1"
     fill_opacity = 1.0
-    background_color = "#1e1e1e"
+    background_color = ManimColor("#1e1e1e")
     final_stroke_width = 5
     construction_stroke_width = 2
     highlight_stroke_width = 12
@@ -56,13 +56,12 @@ class LogoAnimation(Scene):
     dot_radius_ratio = 0.4
     dot_radius_floor = 1e-4
     dot_reveal_radius_scale = 4.0
-    dot_reveal_run_time = 1.7
     dot_field_chunk_size = 2048
     dot_pulse_amplitude = 0.50
 
     def construct(self):
-        self.camera.background_color = self.background_color
-        
+        self.camera.background_color = self.background_color  # type: ignore
+
         drawable_segments = self._load_segments()
 
         vgroup = VGroup(*[spec.mobject for spec in drawable_segments])
@@ -89,7 +88,7 @@ class LogoAnimation(Scene):
         )
         self.wait(0.6)
         dot_field, home_positions, dot_spacing = self._build_logo_dot_field()
-        self._play_filled_logo_to_dot_field(filled_logo, dot_field)
+        self._play_filled_logo_to_dot_field(filled_logo, dot_field, run_time=2)
 
         self._play_logo_dot_swirl(dot_field, home_positions, dot_spacing, run_time=10)
         self.wait(1)
@@ -250,21 +249,23 @@ class LogoAnimation(Scene):
         frame_mask = Rectangle(
             width=config.frame_width + 2,
             height=config.frame_height + 2,
-            fill_color=config.background_color,
+            fill_color=self.background_color,
             fill_opacity=1,
             stroke_width=0,
         )
         cutout_mask = Cutout(
             frame_mask,
             *mask_logo.family_members_with_points(),
-            fill_color=config.background_color,
+            fill_color=self.background_color,
             fill_opacity=1,
             stroke_width=0,
         )
         cutout_mask.set_z_index(2)
         return cutout_mask
 
-    def _play_filled_logo_to_dot_field(self, filled_logo: SVGMobject, dot_field: VGroup) -> None:
+    def _play_filled_logo_to_dot_field(
+        self, filled_logo: SVGMobject, dot_field: VGroup, run_time: Optional[float] = None
+    ) -> None:
         final_radius = self._base_dot_radius()
         reveal_radius = final_radius * self.dot_reveal_radius_scale
         reveal_progress = ValueTracker(0.0)
@@ -282,7 +283,7 @@ class LogoAnimation(Scene):
         self.play(
             filled_logo.animate.set_fill(opacity=0),
             reveal_progress.animate.set_value(1.0),
-            run_time=self.dot_reveal_run_time,
+            run_time=run_time,
             rate_func=rate_functions.ease_in_out_sine,
         )
         dot_field.remove_updater(update_dot_field_radius)
@@ -483,19 +484,29 @@ class LogoAnimation(Scene):
             angle = np.arctan2(rotation_offset[1], rotation_offset[0])
             initial_angles.append(angle)
 
-        def pulse(pos_x, alpha_e, offset):
+        def pulse(pos_x, alpha):
             rel_x = pos_x - min_x
+
+            alpha_e = alpha * (field_width + pulse_amplitude) / field_width
+            pulse_offset = alpha_e * field_width * 2 * np.pi / pulse_amplitude
 
             if rel_x < alpha_e * field_width - pulse_amplitude or rel_x > alpha_e * field_width:
                 return 0.0
 
-            return 1 - np.cos(pulse_frequency * rel_x - offset)
+            return 1 - np.cos(pulse_frequency * rel_x - pulse_offset)
+
+        def pulse2(pos_x, alpha):
+            rel_x = pos_x - min_x
+
+            pulse_offset = alpha * (field_width + pulse_amplitude) / pulse_amplitude - 1
+            x = rel_x / pulse_amplitude - pulse_offset
+            x_clamped = np.clip(x, 0, 1)
+            pulse = rate_functions.ease_in_out_sine(x_clamped)
+
+            return pulse
 
         def update_dots(group):
             alpha = progress.get_value()
-            alpha_e = alpha * (field_width + pulse_amplitude) / field_width
-
-            pulse_offset = alpha_e * field_width * 2 * np.pi / pulse_amplitude
 
             for dot, home_point, rotation_offset, initial_angle in zip(
                 group.submobjects,
@@ -506,11 +517,11 @@ class LogoAnimation(Scene):
                 dot: Dot
 
                 pos_x, pos_y = home_point[:2]
-                pulse_value = pulse(pos_x, alpha_e, pulse_offset)
+                pulse_value = 1 - pulse2(pos_x, alpha)
 
                 # Implement a swirling effect by rotating around the center of a point chosen at random from the home
                 # positions, with a radius that increases with alpha.
-                radius = np.linalg.norm(rotation_offset) * (1 + pulse_value)
+                radius = np.linalg.norm(rotation_offset) * (1 + rate_functions.there_and_back(pulse_value))
                 angle = initial_angle + pulse_value * 2 * np.pi
 
                 center_x = pos_x + rotation_offset[0]
@@ -523,7 +534,7 @@ class LogoAnimation(Scene):
                 new_pos_y = center_y + offset_y
 
                 dot_radius = self._base_dot_radius()
-                target_radius = dot_radius * (1 - pulse_value * 0.3)
+                target_radius = dot_radius * (1 - rate_functions.there_and_back(pulse_value) * 0.3)
                 self._set_dot_radius(dot, target_radius)
                 dot.move_to(np.array([new_pos_x, new_pos_y, 0]))
 
