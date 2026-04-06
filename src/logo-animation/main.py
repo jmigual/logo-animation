@@ -5,11 +5,14 @@ from typing import cast
 import numpy as np
 from manim import (
     Create,
+    Dot,
+    FadeTransform,
     LaggedStart,
     ManimColor,
     VMobject,
     Scene,
     SVGMobject,
+    ValueTracker,
     VGroup,
     config,
     rate_functions,
@@ -46,6 +49,12 @@ class LogoAnimation(Scene):
     fit_width_ratio = 0.74
     fit_height_ratio = 0.72
     length_time_ratio = 0.1
+    dot_min_spacing = 0.1
+    dot_radius_ratio = 0.4
+    dot_wave_cycles = 3
+    dot_wave_run_time = 3.6
+    dot_wave_x_ratio = 0.04
+    dot_wave_y_ratio = 0.12
 
     def construct(self):
         print("Starting")
@@ -73,15 +82,28 @@ class LogoAnimation(Scene):
             run_time=1,
             rate_func=rate_functions.ease_in_out_sine,
         )
-        self.wait(2)
+        self.wait(0.6)
+        dot_field, home_positions, logo_bounds, dot_spacing = self._build_logo_dot_field()
+        self.play(
+            FadeTransform(filled_logo, dot_field),
+            run_time=2,
+            rate_func=rate_functions.ease_in_out_sine,
+        )
 
-    def _load_segments(self) -> list[SegmentSpec]:
+        self._play_logo_dot_wave(dot_field, home_positions, logo_bounds, dot_spacing)
+        self.wait(1)
+
+    def _load_paths(self) -> list[SvgPath]:
         svg = SVG.parse(str(self.asset_path))
         paths: list[SvgPath] = [element for element in svg.elements() if isinstance(element, SvgPath)]
         if not paths:
             raise ValueError(f"No SVG paths found in {self.asset_path}")
 
         self._configure_projection(paths)
+        return paths
+
+    def _load_segments(self) -> list[SegmentSpec]:
+        paths = self._load_paths()
         segments = []
         for path in paths:
             for segment in path.segments():
@@ -209,3 +231,168 @@ class LogoAnimation(Scene):
         filled_logo.move_to(np.array([0, 0, 0]))
         filled_logo.set_z_index(0)
         return filled_logo
+
+    def _build_logo_dot_field(self) -> tuple[VGroup, np.ndarray, np.ndarray, float]:
+        polylines = self._build_logo_polylines(self._load_paths())
+        all_points = np.array([point for polyline in polylines for point in polyline], dtype=float)
+        min_x, min_y = np.min(all_points[:, :2], axis=0)
+        max_x, max_y = np.max(all_points[:, :2], axis=0)
+
+        dot_spacing = self.dot_min_spacing
+        edges = [
+            (start_point, end_point)
+            for polyline in polylines
+            for start_point, end_point in zip(polyline, polyline[1:])
+            if not np.allclose(start_point, end_point)
+        ]
+
+        dots = VGroup()
+        home_positions = []
+        x_values = np.arange(min_x, max_x + dot_spacing, dot_spacing)
+        y_values = np.arange(min_y, max_y + dot_spacing, dot_spacing)
+
+        for row_index, y in enumerate(y_values):
+            row_offset = dot_spacing * 0.5 if row_index % 2 else 0.0
+            for x in x_values + row_offset:
+                point = np.array([x, y, 0.0], dtype=float)
+                if not self._point_is_inside_logo(point, edges):
+                    continue
+
+                dot = Dot(point=point, radius=dot_spacing * self.dot_radius_ratio, color=self.fill_color)
+                dot.set_stroke(width=0, opacity=0)
+                dot.set_z_index(1)
+                dots.add(dot)
+                home_positions.append(point)
+
+        if not home_positions:
+            raise ValueError("The rasterized logo did not produce any dots")
+
+        logo_bounds = np.array([[min_x, min_y], [max_x, max_y]], dtype=float)
+        return dots, np.array(home_positions, dtype=float), logo_bounds, dot_spacing
+
+    def _build_logo_polylines(self, paths: list[SvgPath]) -> list[list[np.ndarray]]:
+        polylines = []
+        for path in paths:
+            current_polyline = []
+            for segment in path.segments():
+                if isinstance(segment, Move):
+                    if len(current_polyline) > 1:
+                        polylines.append(self._close_polyline(current_polyline))
+                    current_polyline = [self._scene_point(segment.end)] if segment.end is not None else []
+                    continue
+
+                segment_points = self._approximate_segment_points(segment)
+                if not segment_points:
+                    continue
+
+                if not current_polyline:
+                    current_polyline = list(segment_points)
+                elif np.allclose(current_polyline[-1], segment_points[0]):
+                    current_polyline.extend(segment_points[1:])
+                else:
+                    current_polyline.extend(segment_points)
+
+                if isinstance(segment, Close) and len(current_polyline) > 1:
+                    polylines.append(self._close_polyline(current_polyline))
+                    current_polyline = []
+
+            if len(current_polyline) > 1:
+                polylines.append(self._close_polyline(current_polyline))
+
+        if not polylines:
+            raise ValueError("The SVG did not produce any closed polylines for rasterization")
+
+        return polylines
+
+    def _close_polyline(self, polyline: list[np.ndarray]) -> list[np.ndarray]:
+        closed_polyline = list(polyline)
+        if not np.allclose(closed_polyline[0], closed_polyline[-1]):
+            closed_polyline.append(closed_polyline[0])
+        return closed_polyline
+
+    def _approximate_segment_points(self, segment: PathSegment) -> list[np.ndarray]:
+        if isinstance(segment, (Line, Close)):
+            if segment.start is None or segment.end is None:
+                return []
+            return [self._scene_point(segment.start), self._scene_point(segment.end)]
+
+        if isinstance(segment, SvgCubicBezier):
+            if segment.start is None or segment.end is None:
+                return []
+
+            start_point = self._scene_point(segment.start)
+            control1 = self._scene_point(segment.control1)
+            control2 = self._scene_point(segment.control2)
+            end_point = self._scene_point(segment.end)
+            curve_length = max(segment.length() * self.svg_scale, self.dot_min_spacing)
+            sample_count = max(6, int(np.ceil(curve_length / (self.dot_min_spacing * 0.75))))
+
+            return [
+                ((1 - t) ** 3) * start_point
+                + 3 * ((1 - t) ** 2) * t * control1
+                + 3 * (1 - t) * (t**2) * control2
+                + (t**3) * end_point
+                for t in np.linspace(0.0, 1.0, sample_count + 1)
+            ]
+
+        return []
+
+    def _point_is_inside_logo(self, point: np.ndarray, edges: list[tuple[np.ndarray, np.ndarray]]) -> bool:
+        intersections = 0
+        x, y = point[:2]
+
+        for start_point, end_point in edges:
+            x1, y1 = start_point[:2]
+            x2, y2 = end_point[:2]
+
+            if np.isclose(y1, y2):
+                continue
+            if y < min(y1, y2) or y >= max(y1, y2):
+                continue
+
+            intersection_x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if intersection_x >= x:
+                intersections += 1
+
+        return intersections % 2 == 1
+
+    def _play_logo_dot_wave(
+        self,
+        dot_field: VGroup,
+        home_positions: np.ndarray,
+        logo_bounds: np.ndarray,
+        dot_spacing: float,
+    ) -> None:
+        width = max(float(logo_bounds[1][0] - logo_bounds[0][0]), 1e-6)
+        height = max(float(logo_bounds[1][1] - logo_bounds[0][1]), 1e-6)
+
+        primary_phase = ((home_positions[:, 0] - logo_bounds[0][0]) / width) * (2.5 * np.pi)
+        primary_phase += ((home_positions[:, 1] - logo_bounds[0][1]) / height) * np.pi
+        secondary_phase = ((home_positions[:, 1] - logo_bounds[0][1]) / height) * (2 * np.pi)
+        progress = ValueTracker(0.0)
+
+        def update_dots(group):
+            alpha = progress.get_value()
+            envelope = np.sin(np.pi * alpha)
+            theta = 2 * np.pi * self.dot_wave_cycles * alpha
+            x_amplitude = dot_spacing * self.dot_wave_x_ratio
+            y_amplitude = dot_spacing * self.dot_wave_y_ratio
+
+            for dot, home_point, phase, secondary in zip(
+                group.submobjects,
+                home_positions,
+                primary_phase,
+                secondary_phase,
+            ):
+                x_offset = envelope * x_amplitude * np.sin((2 * theta) - secondary)
+                y_offset = envelope * y_amplitude * np.sin(theta + phase)
+                dot.move_to(home_point + np.array([x_offset, y_offset, 0.0]))
+
+        dot_field.add_updater(update_dots)
+        self.play(
+            progress.animate.set_value(1.0),
+            run_time=self.dot_wave_run_time,
+            rate_func=rate_functions.linear,
+        )
+        dot_field.remove_updater(update_dots)
+        update_dots(dot_field)
