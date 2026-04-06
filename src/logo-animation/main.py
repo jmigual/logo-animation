@@ -51,10 +51,12 @@ class LogoAnimation(Scene):
     length_time_ratio = 0.1
     dot_min_spacing = 0.1
     dot_radius_ratio = 0.4
-    dot_wave_cycles = 3
-    dot_wave_run_time = 3.6
-    dot_wave_x_ratio = 0.04
-    dot_wave_y_ratio = 0.12
+    dot_swirl_run_time = 4.2
+    dot_swirl_turns = 1.75
+    dot_swirl_radius_ratio = 0.36
+    dot_swirl_jitter_ratio = 1.8
+    dot_swirl_flow_ratio = 0.32
+    dot_swirl_orbit_ratio = 2.4
 
     def construct(self):
         print("Starting")
@@ -83,14 +85,18 @@ class LogoAnimation(Scene):
             rate_func=rate_functions.ease_in_out_sine,
         )
         self.wait(0.6)
-        dot_field, home_positions, logo_bounds, dot_spacing = self._build_logo_dot_field()
+        dot_field, home_positions, dot_spacing = self._build_logo_dot_field()
         self.play(
             FadeTransform(filled_logo, dot_field),
-            run_time=2,
+            run_time=1.7,
             rate_func=rate_functions.ease_in_out_sine,
         )
 
-        self._play_logo_dot_wave(dot_field, home_positions, logo_bounds, dot_spacing)
+        self._play_logo_dot_swirl(
+            dot_field,
+            home_positions,
+            dot_spacing,
+        )
         self.wait(1)
 
     def _load_paths(self) -> list[SvgPath]:
@@ -232,7 +238,7 @@ class LogoAnimation(Scene):
         filled_logo.set_z_index(0)
         return filled_logo
 
-    def _build_logo_dot_field(self) -> tuple[VGroup, np.ndarray, np.ndarray, float]:
+    def _build_logo_dot_field(self) -> tuple[VGroup, np.ndarray, float]:
         polylines = self._build_logo_polylines(self._load_paths())
         all_points = np.array([point for polyline in polylines for point in polyline], dtype=float)
         min_x, min_y = np.min(all_points[:, :2], axis=0)
@@ -268,8 +274,54 @@ class LogoAnimation(Scene):
         if not home_positions:
             raise ValueError("The rasterized logo did not produce any dots")
 
-        logo_bounds = np.array([[min_x, min_y], [max_x, max_y]], dtype=float)
-        return dots, np.array(home_positions, dtype=float), logo_bounds, dot_spacing
+        return dots, np.array(home_positions, dtype=float), dot_spacing
+
+    def _build_logo_swirl_state(
+        self,
+        home_positions: np.ndarray,
+        logo_bounds: np.ndarray,
+        dot_spacing: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        width = max(float(logo_bounds[1][0] - logo_bounds[0][0]), 1e-6)
+        height = max(float(logo_bounds[1][1] - logo_bounds[0][1]), 1e-6)
+        max_dimension = max(width, height)
+        swirl_center = np.array(
+            [
+                logo_bounds[0][0] + width * 0.5,
+                logo_bounds[0][1] + height * 0.5,
+                0.0,
+            ],
+            dtype=float,
+        )
+
+        normalized_x = (home_positions[:, 0] - logo_bounds[0][0]) / width
+        normalized_y = (home_positions[:, 1] - logo_bounds[0][1]) / height
+        relative = home_positions[:, :2] - swirl_center[:2]
+        final_radius = np.linalg.norm(relative, axis=1)
+        final_angle = np.arctan2(relative[:, 1], relative[:, 0])
+
+        swirl_phase = (2.2 * np.pi * normalized_x) - (1.4 * np.pi * normalized_y)
+        start_angle = final_angle + (2 * np.pi * self.dot_swirl_turns * (0.6 + 0.4 * (1.0 - normalized_y)))
+        start_angle += 0.25 * np.sin(swirl_phase)
+
+        start_radius = final_radius + max_dimension * self.dot_swirl_radius_ratio * (0.7 + 0.3 * np.cos(swirl_phase))
+        jitter = dot_spacing * self.dot_swirl_jitter_ratio
+        jitter_x = jitter * np.cos((2.0 * swirl_phase) + (normalized_y * np.pi))
+        jitter_y = jitter * np.sin((1.6 * swirl_phase) - (normalized_x * np.pi))
+
+        start_positions = np.column_stack(
+            [
+                swirl_center[0] + (start_radius * np.cos(start_angle)) + jitter_x,
+                swirl_center[1] + (start_radius * np.sin(start_angle)) + jitter_y,
+                np.zeros(len(home_positions)),
+            ]
+        )
+
+        flow_delay = self.dot_swirl_flow_ratio * (
+            (0.55 * (1.0 - normalized_y)) + (0.45 * (0.5 + (0.5 * np.sin(swirl_phase + (np.pi / 4)))))
+        )
+        flow_delay = np.clip(flow_delay, 0.0, self.dot_swirl_flow_ratio)
+        return start_positions, swirl_center, swirl_phase, flow_delay
 
     def _build_logo_polylines(self, paths: list[SvgPath]) -> list[list[np.ndarray]]:
         polylines = []
@@ -380,43 +432,28 @@ class LogoAnimation(Scene):
         closest_point = start_point[:2] + clamped_projection * segment[:2]
         return float(np.linalg.norm(point[:2] - closest_point))
 
-    def _play_logo_dot_wave(
+    def _play_logo_dot_swirl(
         self,
         dot_field: VGroup,
         home_positions: np.ndarray,
-        logo_bounds: np.ndarray,
         dot_spacing: float,
     ) -> None:
-        width = max(float(logo_bounds[1][0] - logo_bounds[0][0]), 1e-6)
-        height = max(float(logo_bounds[1][1] - logo_bounds[0][1]), 1e-6)
-
-        primary_phase = ((home_positions[:, 0] - logo_bounds[0][0]) / width) * (2.5 * np.pi)
-        primary_phase += ((home_positions[:, 1] - logo_bounds[0][1]) / height) * np.pi
-        secondary_phase = ((home_positions[:, 1] - logo_bounds[0][1]) / height) * (2 * np.pi)
         progress = ValueTracker(0.0)
 
         def update_dots(group):
             alpha = progress.get_value()
-            envelope = np.sin(np.pi * alpha)
-            theta = 2 * np.pi * self.dot_wave_cycles * alpha
-            x_amplitude = dot_spacing * self.dot_wave_x_ratio
-            y_amplitude = dot_spacing * self.dot_wave_y_ratio
+            orbit_amplitude = dot_spacing * self.dot_swirl_orbit_ratio
 
-            for dot, home_point, phase, secondary in zip(
+            for dot, home_point in zip(
                 group.submobjects,
                 home_positions,
-                primary_phase,
-                secondary_phase,
             ):
-                x_offset = envelope * x_amplitude * np.sin((2 * theta) - secondary)
-                y_offset = envelope * y_amplitude * np.sin(theta + phase)
-                dot.move_to(home_point + np.array([x_offset, y_offset, 0.0]))
+                pass
 
         dot_field.add_updater(update_dots)
         self.play(
             progress.animate.set_value(1.0),
-            run_time=self.dot_wave_run_time,
+            run_time=self.dot_swirl_run_time,
             rate_func=rate_functions.linear,
         )
         dot_field.remove_updater(update_dots)
-        update_dots(dot_field)
