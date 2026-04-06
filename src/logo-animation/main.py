@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Optional, cast
 
 import numpy as np
 from manim import (
@@ -42,9 +42,10 @@ class SegmentSpec:
 
 class LogoAnimation(Scene):
     asset_path = Path(__file__).resolve().parents[2] / "assets" / "logo_capital.svg"
-    construction_color = "#5D5D5D"
-    fill_color = "#101010"
+    construction_color = "#808080"
+    fill_color = "#E1E1E1"
     fill_opacity = 1.0
+    background_color = "#1e1e1e"
     final_stroke_width = 5
     construction_stroke_width = 2
     highlight_stroke_width = 12
@@ -56,12 +57,12 @@ class LogoAnimation(Scene):
     dot_radius_floor = 1e-4
     dot_reveal_radius_scale = 4.0
     dot_reveal_run_time = 1.7
-    dot_swirl_run_time = 6
     dot_field_chunk_size = 2048
     dot_pulse_amplitude = 0.50
 
     def construct(self):
-        print("Starting")
+        self.camera.background_color = self.background_color
+        
         drawable_segments = self._load_segments()
 
         vgroup = VGroup(*[spec.mobject for spec in drawable_segments])
@@ -75,7 +76,7 @@ class LogoAnimation(Scene):
         self.play(
             LaggedStart(*mobjects, lag_ratio=0.4),
             rate_func=rate_functions.ease_in_out_cubic,
-            run_time=5,
+            run_time=7,
         )
 
         filled_logo = self._build_filled_logo()
@@ -90,11 +91,7 @@ class LogoAnimation(Scene):
         dot_field, home_positions, dot_spacing = self._build_logo_dot_field()
         self._play_filled_logo_to_dot_field(filled_logo, dot_field)
 
-        self._play_logo_dot_swirl(
-            dot_field,
-            home_positions,
-            dot_spacing,
-        )
+        self._play_logo_dot_swirl(dot_field, home_positions, dot_spacing, run_time=10)
         self.wait(1)
 
     def _load_paths(self) -> list[SvgPath]:
@@ -470,6 +467,7 @@ class LogoAnimation(Scene):
         dot_field: VGroup,
         home_positions: np.ndarray,
         dot_spacing: float,
+        run_time: Optional[float] = None,
     ) -> None:
         progress = ValueTracker(0.0)
 
@@ -532,7 +530,7 @@ class LogoAnimation(Scene):
         dot_field.add_updater(update_dots)
         self.play(
             progress.animate.set_value(1.0),
-            run_time=self.dot_swirl_run_time,
+            run_time=run_time,
             rate_func=rate_functions.linear,
         )
         dot_field.remove_updater(update_dots)
