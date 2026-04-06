@@ -1,9 +1,29 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
-from manim import Create, ManimColor, ParametricFunction, Scene, config, rate_functions
-from svgelements import Close, Move, Path as SvgPath, SVG
+from manim import (
+    Create,
+    CubicBezier,
+    ManimColor,
+    ParametricFunction,
+    VMobject,
+    Scene,
+    SVGMobject,
+    VGroup,
+    config,
+    rate_functions,
+)
+from svgelements import (
+    Close,
+    Line,
+    Move,
+    CubicBezier as SvgCubicBezier,
+    Path as SvgPath,
+    SVG,
+    PathSegment,
+)
 
 
 config.background_color = ManimColor("#f7f2e7")
@@ -12,68 +32,63 @@ config.background_color = ManimColor("#f7f2e7")
 @dataclass(frozen=True)
 class SegmentSpec:
     segment: object
-    scaled_length: float
-    step_size: float
-    start_direction: np.ndarray
-    end_direction: np.ndarray
+    mobject: VMobject
+    time: float
 
 
 class LogoAnimation(Scene):
     asset_path = Path(__file__).resolve().parents[2] / "assets" / "logo_capital.svg"
-    final_color = "#101010"
-    construction_color = "#277da1"
-    highlight_color = "#f4a261"
+    construction_color = "#5D5D5D"
+    fill_color = "#101010"
+    fill_opacity = 1.0
     final_stroke_width = 5
-    construction_stroke_width = 7
+    construction_stroke_width = 2
     highlight_stroke_width = 12
     fit_width_ratio = 0.74
     fit_height_ratio = 0.72
+    length_time_ratio = 0.08
 
     def construct(self):
         drawable_segments = self._load_segments()
 
         for segment_spec in drawable_segments:
-            stretched_segment = self._build_segment_mobject(segment_spec, stretched=True)
-            highlighted_segment = self._build_segment_mobject(
-                segment_spec,
-                color=self.highlight_color,
-                stroke_width=self.highlight_stroke_width,
+            mobject = segment_spec.mobject
+            mobject.set_stroke(
+                color=self.construction_color, width=self.construction_stroke_width
             )
-
+            mobject.set_fill(opacity=0)
             self.play(
-                self._create_animation(stretched_segment, segment_spec.scaled_length),
-                rate_func=rate_functions.ease_out_sine,
-            )
-            self.play(
-                stretched_segment.animate.become(highlighted_segment),
-                run_time=0.18,
-                rate_func=rate_functions.smooth,
-            )
-            self.play(
-                stretched_segment.animate.set_stroke(
-                    color=self.final_color,
-                    width=self.final_stroke_width,
-                ),
-                run_time=0.16,
+                Create(mobject),
+                run_time=segment_spec.time,
                 rate_func=rate_functions.ease_in_out_sine,
             )
 
-        self.wait(0.5)
+        filled_logo = self._build_filled_logo()
+        self.add(filled_logo)
+        self.play(
+            filled_logo.animate.set_fill(opacity=self.fill_opacity),
+            run_time=0.55,
+            rate_func=rate_functions.ease_in_out_sine,
+        )
 
-    def _load_segments(self):
+        self.wait(2)
+
+    def _load_segments(self) -> list[SegmentSpec]:
         svg = SVG.parse(str(self.asset_path))
-        paths = [element for element in svg.elements() if isinstance(element, SvgPath)]
+        paths: list[SvgPath] = [
+            element for element in svg.elements() if isinstance(element, SvgPath)
+        ]
         if not paths:
             raise ValueError(f"No SVG paths found in {self.asset_path}")
 
         self._configure_projection(paths)
         segments = []
         for path in paths:
-            for segment in path:
-                if isinstance(segment, Move):
-                    continue
-                segments.append(self._build_segment_spec(segment))
-        return segments
+            for segment in path.segments():
+                segment_spec = self._build_segment_spec(segment)
+                segments.append(segment_spec)
+
+        return list(filter(lambda x: x is not None, segments))
 
     def _configure_projection(self, paths):
         bounding_boxes = [path.bbox() for path in paths]
@@ -95,76 +110,68 @@ class LogoAnimation(Scene):
             config.frame_width * self.fit_width_ratio / svg_width,
             config.frame_height * self.fit_height_ratio / svg_height,
         )
-        self.stretch_distance = float(np.hypot(config.frame_width, config.frame_height) * 0.95)
-
-    def _build_segment_spec(self, segment):
-        scaled_length = float(segment.length()) * self.svg_scale
-        step_size = self._segment_step(segment, scaled_length)
-        start_direction = self._segment_tangent(segment, 0.0, 0.02)
-        end_direction = self._segment_tangent(segment, 1.0, -0.02)
-        return SegmentSpec(
-            segment=segment,
-            scaled_length=scaled_length,
-            step_size=step_size,
-            start_direction=start_direction,
-            end_direction=end_direction,
+        self.stretch_distance = float(
+            np.hypot(config.frame_width, config.frame_height) * 0.95
         )
 
-    def _segment_step(self, segment, scaled_length):
+    def _build_segment_spec(self, segment: PathSegment):
         if isinstance(segment, Close):
-            return 0.08
-        if type(segment).__name__ == "Line":
-            return 0.08 if scaled_length < 1.4 else 0.05
-        if type(segment).__name__ == "Arc":
-            return 0.035
-        return 0.03
+            return self._build_segment_spec_close(segment)
+        elif isinstance(segment, Move):
+            return None
+        elif isinstance(segment, Line):
+            return self._build_segment_spec_line(segment)
+        elif isinstance(segment, SvgCubicBezier):
+            return self._build_segment_spec_cubic_bezier(segment)
+        else:
+            return None
 
-    def _segment_tangent(self, segment, anchor, delta):
-        anchor_point = self._scene_point(segment.point(anchor))
-        comparison_point = self._scene_point(segment.point(np.clip(anchor + delta, 0.0, 1.0)))
-        tangent = comparison_point - anchor_point
-        norm = np.linalg.norm(tangent)
-        if norm == 0:
-            return np.array([1.0, 0.0, 0.0])
-        return tangent / norm
+    def _build_segment_spec_close(self, segment: Close):
+        if segment.start is None or segment.end is None:
+            return None
+
+        # Same as line
+        return self._build_segment_spec_line(cast(Line, segment))
+
+    def _build_segment_spec_line(self, segment: Line):
+        start_point = self._scene_point(segment.start)
+        end_point = self._scene_point(segment.end)
+        line_mobject = VMobject()
+        line_mobject.set_points_as_corners([start_point, end_point])
+
+        length = float(np.linalg.norm(end_point - start_point))
+
+        return SegmentSpec(
+            segment=segment, mobject=line_mobject, time=length * self.length_time_ratio
+        )
+
+    def _build_segment_spec_cubic_bezier(self, segment: SvgCubicBezier):
+        start_point = self._scene_point(segment.start)
+        control1 = self._scene_point(segment.control1)
+        control2 = self._scene_point(segment.control2)
+        end_point = self._scene_point(segment.end)
+        length = segment.length() * self.svg_scale
+
+        mobject = VMobject()
+        mobject.add_cubic_bezier_curve(start_point, control1, control2, end_point)
+        return SegmentSpec(
+            segment=segment, mobject=mobject, time=length * self.length_time_ratio
+        )
 
     def _scene_point(self, svg_point):
         x = (float(svg_point.x) - self.svg_center[0]) * self.svg_scale
         y = -(float(svg_point.y) - self.svg_center[1]) * self.svg_scale
         return np.array([x, y, 0.0])
 
-    def _stretched_scene_point(self, segment_spec, alpha):
-        alpha = float(alpha)
-        base_point = self._scene_point(segment_spec.segment.point(alpha))
-        start_pull = -segment_spec.start_direction * self.stretch_distance * (1 - alpha) ** 1.35
-        end_pull = segment_spec.end_direction * self.stretch_distance * alpha**1.35
-        return base_point + start_pull + end_pull
-
-    def _build_segment_mobject(
-        self,
-        segment_spec,
-        stretched=False,
-        color=None,
-        stroke_width=None,
-    ):
-        def point_builder(alpha):
-            if stretched:
-                return self._stretched_scene_point(segment_spec, alpha)
-            return self._scene_point(segment_spec.segment.point(alpha))
-
-        curve = ParametricFunction(
-            point_builder,
-            t_range=(0, 1, segment_spec.step_size),
-            use_smoothing=not isinstance(segment_spec.segment, Close),
-        )
-        curve.set_stroke(
-            color=color or (self.construction_color if stretched else self.final_color),
-            width=stroke_width or (
-                self.construction_stroke_width if stretched else self.final_stroke_width
-            ),
-        )
-        return curve
-
     def _create_animation(self, stretched_segment, scaled_length):
         run_time = float(np.clip(0.12 + scaled_length * 0.08, 0.18, 0.5))
         return Create(stretched_segment, run_time=run_time)
+
+    def _build_filled_logo(self):
+        filled_logo = SVGMobject(str(self.asset_path))
+        filled_logo.set_stroke(width=0, opacity=0)
+        filled_logo.set_fill(color=self.fill_color, opacity=0)
+        filled_logo.scale_to_fit_height(config.frame_height * self.fit_height_ratio)
+        filled_logo.move_to(np.array([0, 0, 0]))
+        filled_logo.set_z_index(0)
+        return filled_logo
