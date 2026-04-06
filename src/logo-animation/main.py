@@ -4,11 +4,13 @@ from typing import cast
 
 import numpy as np
 from manim import (
+    Cutout,
     Create,
     Dot,
-    FadeTransform,
     LaggedStart,
     ManimColor,
+    Mobject,
+    Rectangle,
     VMobject,
     Scene,
     SVGMobject,
@@ -51,6 +53,9 @@ class LogoAnimation(Scene):
     length_time_ratio = 0.1
     dot_min_spacing = 0.1
     dot_radius_ratio = 0.4
+    dot_radius_floor = 1e-4
+    dot_reveal_radius_scale = 4.0
+    dot_reveal_run_time = 1.7
     dot_swirl_run_time = 6
     dot_field_chunk_size = 2048
     dot_pulse_amplitude = 0.50
@@ -83,11 +88,7 @@ class LogoAnimation(Scene):
         )
         self.wait(0.6)
         dot_field, home_positions, dot_spacing = self._build_logo_dot_field()
-        self.play(
-            FadeTransform(filled_logo, dot_field),
-            run_time=1.7,
-            rate_func=rate_functions.ease_in_out_sine,
-        )
+        self._play_filled_logo_to_dot_field(filled_logo, dot_field)
 
         self._play_logo_dot_swirl(
             dot_field,
@@ -232,8 +233,63 @@ class LogoAnimation(Scene):
         filled_logo.set_fill(color=self.fill_color, opacity=0)
         filled_logo.scale_to_fit_height(config.frame_height * self.fit_height_ratio)
         filled_logo.move_to(np.array([0, 0, 0]))
-        filled_logo.set_z_index(0)
+        filled_logo.set_z_index(3)
         return filled_logo
+
+    def _base_dot_radius(self) -> float:
+        return self.dot_min_spacing * self.dot_radius_ratio
+
+    def _set_dot_radius(self, dot: Dot, radius: float) -> None:
+        target_radius = max(radius, self.dot_radius_floor)
+        dot.scale_to_fit_width(target_radius * 2)
+        dot.radius = target_radius
+
+    def _set_dot_field_radius(self, dot_field: VGroup, radius: float) -> None:
+        for dot in dot_field.submobjects:
+            self._set_dot_radius(cast(Dot, dot), radius)
+
+    def _build_logo_cutout_mask(self, filled_logo: SVGMobject) -> VMobject:
+        mask_logo = filled_logo.copy()
+        frame_mask = Rectangle(
+            width=config.frame_width + 2,
+            height=config.frame_height + 2,
+            fill_color=config.background_color,
+            fill_opacity=1,
+            stroke_width=0,
+        )
+        cutout_mask = Cutout(
+            frame_mask,
+            *mask_logo.family_members_with_points(),
+            fill_color=config.background_color,
+            fill_opacity=1,
+            stroke_width=0,
+        )
+        cutout_mask.set_z_index(2)
+        return cutout_mask
+
+    def _play_filled_logo_to_dot_field(self, filled_logo: SVGMobject, dot_field: VGroup) -> None:
+        final_radius = self._base_dot_radius()
+        reveal_radius = final_radius * self.dot_reveal_radius_scale
+        reveal_progress = ValueTracker(0.0)
+        cutout_mask = self._build_logo_cutout_mask(filled_logo)
+
+        self._set_dot_field_radius(dot_field, reveal_radius)
+        self.add(dot_field, cutout_mask)
+
+        def update_dot_field_radius(group: Mobject) -> None:
+            alpha = reveal_progress.get_value()
+            current_radius = reveal_radius + (final_radius - reveal_radius) * alpha
+            self._set_dot_field_radius(cast(VGroup, group), current_radius)
+
+        dot_field.add_updater(update_dot_field_radius)
+        self.play(
+            filled_logo.animate.set_fill(opacity=0),
+            reveal_progress.animate.set_value(1.0),
+            run_time=self.dot_reveal_run_time,
+            rate_func=rate_functions.ease_in_out_sine,
+        )
+        dot_field.remove_updater(update_dot_field_radius)
+        self.remove(cutout_mask, filled_logo)
 
     def _build_logo_dot_field(self) -> tuple[VGroup, np.ndarray, float]:
         polylines = self._build_logo_polylines(self._load_paths())
@@ -248,7 +304,7 @@ class LogoAnimation(Scene):
             if not np.allclose(start_point, end_point)
         ]
 
-        dot_radius = self.dot_min_spacing * self.dot_radius_ratio
+        dot_radius = self._base_dot_radius()
         x_values = np.arange(min_x, max_x + self.dot_min_spacing, self.dot_min_spacing)
         y_values = np.arange(min_y, max_y + self.dot_min_spacing, self.dot_min_spacing)
         candidate_rows = []
@@ -468,12 +524,9 @@ class LogoAnimation(Scene):
                 new_pos_x = center_x + offset_x
                 new_pos_y = center_y + offset_y
 
-                dot_radius = self.dot_min_spacing * self.dot_radius_ratio
-
-                # Dot.radius is only metadata here; the visible size changes when the points are rescaled.
-                target_radius = max(dot_radius * (1 - pulse_value * 0.3), 1e-4)
-                dot.scale_to_fit_width(target_radius * 2)
-                dot.radius = target_radius
+                dot_radius = self._base_dot_radius()
+                target_radius = dot_radius * (1 - pulse_value * 0.3)
+                self._set_dot_radius(dot, target_radius)
                 dot.move_to(np.array([new_pos_x, new_pos_y, 0]))
 
         dot_field.add_updater(update_dots)
