@@ -85,9 +85,13 @@ class LogoAnimation(Scene):
         for path in paths:
             for segment in path.segments():
                 segment_spec = self._build_segment_spec(segment)
-                segments.append(segment_spec)
 
-        return list(filter(lambda x: x is not None, segments))
+                if isinstance(segment_spec, list):
+                    segments.extend(segment_spec)
+                elif segment_spec is not None:
+                    segments.append(segment_spec)
+
+        return segments
 
     def _configure_projection(self, paths):
         bounding_boxes = [path.bbox() for path in paths]
@@ -110,7 +114,7 @@ class LogoAnimation(Scene):
             config.frame_height * self.fit_height_ratio / svg_height,
         )
 
-    def _build_segment_spec(self, segment: PathSegment):
+    def _build_segment_spec(self, segment: PathSegment) -> SegmentSpec | None | list[SegmentSpec]:
         if isinstance(segment, Close):
             return self._build_segment_spec_close(segment)
         elif isinstance(segment, Move):
@@ -122,14 +126,14 @@ class LogoAnimation(Scene):
         else:
             return None
 
-    def _build_segment_spec_close(self, segment: Close):
+    def _build_segment_spec_close(self, segment: Close) -> SegmentSpec | None:
         if segment.start is None or segment.end is None:
             return None
 
         # Same as line
         return self._build_segment_spec_line(cast(Line, segment))
 
-    def _build_segment_spec_line(self, segment: Line):
+    def _build_segment_spec_line(self, segment: Line) -> SegmentSpec | None:
         start_point = self._scene_point(segment.start)
         end_point = self._scene_point(segment.end)
         direction = end_point - start_point
@@ -175,7 +179,7 @@ class LogoAnimation(Scene):
         length = float(np.linalg.norm(chosen_end - chosen_start))
         return SegmentSpec(segment=segment, mobject=line_mobject, time=length * self.length_time_ratio)
 
-    def _build_segment_spec_cubic_bezier(self, segment: SvgCubicBezier):
+    def _build_segment_spec_cubic_bezier(self, segment: SvgCubicBezier) -> SegmentSpec | list[SegmentSpec]:
         start_point = self._scene_point(segment.start)
         control1 = self._scene_point(segment.control1)
         control2 = self._scene_point(segment.control2)
