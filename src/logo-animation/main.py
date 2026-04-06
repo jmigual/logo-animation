@@ -48,6 +48,7 @@ class LogoAnimation(Scene):
     length_time_ratio = 0.1
 
     def construct(self):
+        print("Starting")
         drawable_segments = self._load_segments()
 
         vgroup = VGroup(*[spec.mobject for spec in drawable_segments])
@@ -56,12 +57,12 @@ class LogoAnimation(Scene):
             mobject = segment_spec.mobject
             mobject.set_stroke(color=self.construction_color, width=self.construction_stroke_width)
             mobject.set_fill(opacity=0)
-            mobjects.append(Create(mobject, run_time=segment_spec.time))
+            mobjects.append(Create(mobject, run_time=segment_spec.time, rate_func=rate_functions.ease_in_out_sine))
 
         self.play(
-            LaggedStart(*mobjects, lag_ratio=0.3),
+            LaggedStart(*mobjects, lag_ratio=0.4),
+            rate_func=rate_functions.ease_in_out_cubic,
             run_time=5,
-            rate_func=rate_functions.ease_in_out_sine,
         )
 
         filled_logo = self._build_filled_logo()
@@ -69,7 +70,7 @@ class LogoAnimation(Scene):
         self.play(
             filled_logo.animate.set_fill(opacity=self.fill_opacity),
             vgroup.animate.set_stroke(opacity=0),
-            run_time=0.55,
+            run_time=1,
             rate_func=rate_functions.ease_in_out_sine,
         )
         self.wait(2)
@@ -124,6 +125,7 @@ class LogoAnimation(Scene):
         elif isinstance(segment, SvgCubicBezier):
             return self._build_segment_spec_cubic_bezier(segment)
         else:
+            print(f"Unsupported segment type: {type(segment)}")
             return None
 
     def _build_segment_spec_close(self, segment: Close) -> SegmentSpec | None:
