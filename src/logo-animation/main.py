@@ -51,12 +51,9 @@ class LogoAnimation(Scene):
     length_time_ratio = 0.1
     dot_min_spacing = 0.1
     dot_radius_ratio = 0.4
-    dot_swirl_run_time = 4.2
-    dot_swirl_turns = 1.75
-    dot_swirl_radius_ratio = 0.36
-    dot_swirl_jitter_ratio = 1.8
-    dot_swirl_flow_ratio = 0.32
-    dot_swirl_orbit_ratio = 2.4
+    dot_swirl_run_time = 6
+    dot_field_chunk_size = 2048
+    dot_pulse_amplitude = 0.50
 
     def construct(self):
         print("Starting")
@@ -244,7 +241,6 @@ class LogoAnimation(Scene):
         min_x, min_y = np.min(all_points[:, :2], axis=0)
         max_x, max_y = np.max(all_points[:, :2], axis=0)
 
-        dot_spacing = self.dot_min_spacing
         edges = [
             (start_point, end_point)
             for polyline in polylines
@@ -252,76 +248,83 @@ class LogoAnimation(Scene):
             if not np.allclose(start_point, end_point)
         ]
 
-        dot_radius = dot_spacing * self.dot_radius_ratio
-        dots = VGroup()
-        home_positions = []
-        x_values = np.arange(min_x, max_x + dot_spacing, dot_spacing)
-        y_values = np.arange(min_y, max_y + dot_spacing, dot_spacing)
+        dot_radius = self.dot_min_spacing * self.dot_radius_ratio
+        x_values = np.arange(min_x, max_x + self.dot_min_spacing, self.dot_min_spacing)
+        y_values = np.arange(min_y, max_y + self.dot_min_spacing, self.dot_min_spacing)
+        candidate_rows = []
 
         for row_index, y in enumerate(y_values):
-            row_offset = dot_spacing * 0.5 if row_index % 2 else 0.0
-            for x in x_values + row_offset:
-                point = np.array([x, y, 0.0], dtype=float)
-                if not self._point_is_inside_logo(point, dot_radius, edges):
-                    continue
+            row_offset = self.dot_min_spacing * 0.5 if row_index % 2 else 0.0
+            row_x_values = x_values + row_offset
+            candidate_rows.append(
+                np.column_stack(
+                    [
+                        row_x_values,
+                        np.full_like(row_x_values, y, dtype=float),
+                        np.zeros_like(row_x_values, dtype=float),
+                    ]
+                )
+            )
 
-                dot = Dot(point=point, radius=dot_radius, color=self.fill_color)
-                dot.set_stroke(width=0, opacity=0)
-                dot.set_z_index(1)
-                dots.add(dot)
-                home_positions.append(point)
+        candidate_points = np.vstack(candidate_rows)
+        home_positions = candidate_points[self._build_logo_dot_mask(candidate_points, edges, dot_radius)]
 
-        if not home_positions:
+        if not len(home_positions):
             raise ValueError("The rasterized logo did not produce any dots")
 
-        return dots, np.array(home_positions, dtype=float), dot_spacing
+        dots = VGroup()
+        for point in home_positions:
+            dot = Dot(point=point, radius=dot_radius, color=self.fill_color)
+            dot.set_stroke(width=0, opacity=0)
+            dot.set_z_index(1)
+            dots.add(dot)
 
-    def _build_logo_swirl_state(
+        return dots, home_positions, self.dot_min_spacing
+
+    def _build_logo_dot_mask(
         self,
-        home_positions: np.ndarray,
-        logo_bounds: np.ndarray,
-        dot_spacing: float,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        width = max(float(logo_bounds[1][0] - logo_bounds[0][0]), 1e-6)
-        height = max(float(logo_bounds[1][1] - logo_bounds[0][1]), 1e-6)
-        max_dimension = max(width, height)
-        swirl_center = np.array(
-            [
-                logo_bounds[0][0] + width * 0.5,
-                logo_bounds[0][1] + height * 0.5,
-                0.0,
-            ],
-            dtype=float,
-        )
+        candidate_points: np.ndarray,
+        edges: list[tuple[np.ndarray, np.ndarray]],
+        radius: float,
+    ) -> np.ndarray:
+        edge_starts = np.array([start_point[:2] for start_point, _ in edges], dtype=float)
+        edge_ends = np.array([end_point[:2] for _, end_point in edges], dtype=float)
+        edge_segments = edge_ends - edge_starts
+        segment_lengths_squared = np.sum(edge_segments * edge_segments, axis=1)
+        segment_lengths_squared = np.where(np.isclose(segment_lengths_squared, 0.0), 1.0, segment_lengths_squared)
 
-        normalized_x = (home_positions[:, 0] - logo_bounds[0][0]) / width
-        normalized_y = (home_positions[:, 1] - logo_bounds[0][1]) / height
-        relative = home_positions[:, :2] - swirl_center[:2]
-        final_radius = np.linalg.norm(relative, axis=1)
-        final_angle = np.arctan2(relative[:, 1], relative[:, 0])
+        x1 = edge_starts[:, 0]
+        y1 = edge_starts[:, 1]
+        x2 = edge_ends[:, 0]
+        y2 = edge_ends[:, 1]
+        delta_y = y2 - y1
+        non_horizontal = ~np.isclose(delta_y, 0.0)
+        safe_delta_y = np.where(non_horizontal, delta_y, 1.0)
+        radius_squared = radius * radius
 
-        swirl_phase = (2.2 * np.pi * normalized_x) - (1.4 * np.pi * normalized_y)
-        start_angle = final_angle + (2 * np.pi * self.dot_swirl_turns * (0.6 + 0.4 * (1.0 - normalized_y)))
-        start_angle += 0.25 * np.sin(swirl_phase)
+        mask = np.zeros(len(candidate_points), dtype=bool)
+        for start_index in range(0, len(candidate_points), self.dot_field_chunk_size):
+            end_index = start_index + self.dot_field_chunk_size
+            batch = candidate_points[start_index:end_index, :2]
+            x = batch[:, 0][:, None]
+            y = batch[:, 1][:, None]
 
-        start_radius = final_radius + max_dimension * self.dot_swirl_radius_ratio * (0.7 + 0.3 * np.cos(swirl_phase))
-        jitter = dot_spacing * self.dot_swirl_jitter_ratio
-        jitter_x = jitter * np.cos((2.0 * swirl_phase) + (normalized_y * np.pi))
-        jitter_y = jitter * np.sin((1.6 * swirl_phase) - (normalized_x * np.pi))
+            point_vectors = batch[:, None, :] - edge_starts[None, :, :]
+            projections = np.sum(point_vectors * edge_segments[None, :, :], axis=2) / segment_lengths_squared[None, :]
+            clamped_projections = np.clip(projections, 0.0, 1.0)
+            closest_points = edge_starts[None, :, :] + clamped_projections[:, :, None] * edge_segments[None, :, :]
+            distance_squared = np.sum((batch[:, None, :] - closest_points) ** 2, axis=2)
+            min_distance_squared = np.min(distance_squared, axis=1)
 
-        start_positions = np.column_stack(
-            [
-                swirl_center[0] + (start_radius * np.cos(start_angle)) + jitter_x,
-                swirl_center[1] + (start_radius * np.sin(start_angle)) + jitter_y,
-                np.zeros(len(home_positions)),
-            ]
-        )
+            y_in_range = (y >= np.minimum(y1, y2)[None, :]) & (y < np.maximum(y1, y2)[None, :])
+            intersection_x = x1[None, :] + ((y - y1[None, :]) * (x2 - x1)[None, :] / safe_delta_y[None, :])
+            crossings = non_horizontal[None, :] & y_in_range & (intersection_x >= x)
+            intersections = np.count_nonzero(crossings, axis=1)
 
-        flow_delay = self.dot_swirl_flow_ratio * (
-            (0.55 * (1.0 - normalized_y)) + (0.45 * (0.5 + (0.5 * np.sin(swirl_phase + (np.pi / 4)))))
-        )
-        flow_delay = np.clip(flow_delay, 0.0, self.dot_swirl_flow_ratio)
-        return start_positions, swirl_center, swirl_phase, flow_delay
+            end_index2 = start_index + len(batch)
+            mask[start_index:end_index2] = (intersections % 2 == 1) & (min_distance_squared >= radius_squared)
+
+        return mask
 
     def _build_logo_polylines(self, paths: list[SvgPath]) -> list[list[np.ndarray]]:
         polylines = []
@@ -390,32 +393,6 @@ class LogoAnimation(Scene):
 
         return []
 
-    def _point_is_inside_logo(
-        self,
-        point: np.ndarray,
-        radius: float,
-        edges: list[tuple[np.ndarray, np.ndarray]],
-    ) -> bool:
-        intersections = 0
-        x, y = point[:2]
-        min_edge_distance = float("inf")
-
-        for start_point, end_point in edges:
-            x1, y1 = start_point[:2]
-            x2, y2 = end_point[:2]
-            min_edge_distance = min(min_edge_distance, self._distance_point_to_segment(point, start_point, end_point))
-
-            if np.isclose(y1, y2):
-                continue
-            if y < min(y1, y2) or y >= max(y1, y2):
-                continue
-
-            intersection_x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
-            if intersection_x >= x:
-                intersections += 1
-
-        return intersections % 2 == 1 and min_edge_distance >= radius
-
     def _distance_point_to_segment(
         self,
         point: np.ndarray,
@@ -440,14 +417,61 @@ class LogoAnimation(Scene):
     ) -> None:
         progress = ValueTracker(0.0)
 
+        field_width = dot_field.width
+        min_x = np.min(home_positions[:, 0])
+        pulse_amplitude = field_width * self.dot_pulse_amplitude
+        pulse_frequency = 2 * np.pi / pulse_amplitude
+
+        rotation_offsets = np.random.rand(len(home_positions), 2) * 2 * dot_spacing
+        initial_angles = []
+
+        for rotation_offset in rotation_offsets:
+            angle = np.arctan2(rotation_offset[1], rotation_offset[0])
+            initial_angles.append(angle)
+
+        def pulse(pos_x, alpha_e, offset):
+            rel_x = pos_x - min_x
+
+            if rel_x < alpha_e * field_width - pulse_amplitude or rel_x > alpha_e * field_width:
+                return 0.0
+
+            return 1 - np.cos(pulse_frequency * rel_x - offset)
+
         def update_dots(group):
             alpha = progress.get_value()
-            orbit_amplitude = dot_spacing * self.dot_swirl_orbit_ratio
+            alpha_e = alpha * (field_width + pulse_amplitude) / field_width
 
-            for dot, home_point in zip(
+            pulse_offset = alpha_e * field_width * 2 * np.pi / pulse_amplitude
+
+            for dot, home_point, rotation_offset, initial_angle in zip(
                 group.submobjects,
                 home_positions,
+                rotation_offsets,
+                initial_angles,
             ):
+                dot: Dot
+
+                pos_x, pos_y = home_point[:2]
+                pulse_value = pulse(pos_x, alpha_e, pulse_offset)
+
+                # Implement a swirling effect by rotating around the center of a point chosen at random from the home
+                # positions, with a radius that increases with alpha.
+                radius = np.linalg.norm(rotation_offset) * (1 + pulse_value)
+                angle = initial_angle + pulse_value * 2 * np.pi
+
+                center_x = pos_x + rotation_offset[0]
+                center_y = pos_y + rotation_offset[1]
+
+                offset_x = radius * np.cos(angle + np.pi)
+                offset_y = radius * np.sin(angle + np.pi)
+
+                new_pos_x = center_x + offset_x
+                new_pos_y = center_y + offset_y
+
+                dot_radius = self.dot_min_spacing * self.dot_radius_ratio
+
+                dot.set_radius(dot_radius * (1 - pulse_value * 0.5))
+                dot.move_to(np.array([new_pos_x, new_pos_y, 0]))
                 pass
 
         dot_field.add_updater(update_dots)
