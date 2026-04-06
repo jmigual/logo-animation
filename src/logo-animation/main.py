@@ -46,7 +46,7 @@ class LogoAnimation(Scene):
     highlight_stroke_width = 12
     fit_width_ratio = 0.74
     fit_height_ratio = 0.72
-    length_time_ratio = 0.08
+    length_time_ratio = 0.05
 
     def construct(self):
         drawable_segments = self._load_segments()
@@ -110,9 +110,6 @@ class LogoAnimation(Scene):
             config.frame_width * self.fit_width_ratio / svg_width,
             config.frame_height * self.fit_height_ratio / svg_height,
         )
-        self.stretch_distance = float(
-            np.hypot(config.frame_width, config.frame_height) * 0.95
-        )
 
     def _build_segment_spec(self, segment: PathSegment):
         if isinstance(segment, Close):
@@ -137,7 +134,16 @@ class LogoAnimation(Scene):
         start_point = self._scene_point(segment.start)
         end_point = self._scene_point(segment.end)
         line_mobject = VMobject()
-        line_mobject.set_points_as_corners([start_point, end_point])
+
+        # We want the start and end points to be outside of the frame to create a for this we find
+        # the intersection of the line with the bounding box of the frame and then we build a new
+        # line that starts and ends at the intersection points. This way we can create a
+        # "stretching" effect where the line grows from the center of the frame to the outside.
+        direction = end_point - start_point
+        if np.linalg.norm(direction) == 0:
+            return None
+        
+        
 
         length = float(np.linalg.norm(end_point - start_point))
 
