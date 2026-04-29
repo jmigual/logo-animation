@@ -566,7 +566,17 @@ class LogoAnimation(Scene):
         min_x = np.min(home_positions[:, 0])
         pulse_amplitude = field_width * self.dot_pulse_amplitude
 
-        rotation_offsets = np.random.rand(len(home_positions), 2) * 2 * dot_spacing
+        rng = np.random.default_rng(self.dot_random_seed + 1)
+        offset_angles = rng.uniform(0.0, 2.0 * np.pi, len(home_positions))
+        exponent_mix = rng.random(len(home_positions)) ** 5
+        offset_exponents = 2.8 - 1.8 * exponent_mix
+        offset_radii = dot_spacing * 2.5 * (rng.random(len(home_positions)) ** offset_exponents)
+        rotation_offsets = np.column_stack(
+            [
+                offset_radii * np.cos(offset_angles),
+                offset_radii * np.sin(offset_angles),
+            ]
+        )
         initial_angles = np.arctan2(rotation_offsets[:, 1], rotation_offsets[:, 0])
         rotation_norms = np.linalg.norm(rotation_offsets, axis=1)
 
