@@ -65,13 +65,16 @@ class LogoAnimation(Scene):
     fit_width_ratio = 0.9
     fit_height_ratio = 0.9
     length_time_ratio = 0.1
-    dot_vertical_divisions = 50
+    dot_vertical_divisions = 70
     dot_min_spacing = 0.01
     dot_radius_ratio = 0.4
     dot_radius_floor = 1e-4
     dot_reveal_radius_scale = 4.0
     dot_field_chunk_size = 2048
-    dot_pulse_amplitude = 0.50
+    dot_pulse_amplitude = 1.4
+    dot_random_seed = 0
+    dot_random_target_fill_ratio = 1.0
+    dot_random_max_rounds = 12
 
     def construct(self):
         self.camera.background_color = self.background_color  # type: ignore
@@ -324,25 +327,15 @@ class LogoAnimation(Scene):
         ]
 
         dot_radius = self._base_dot_radius()
-        x_values = np.arange(min_x, max_x + self.dot_min_spacing, self.dot_min_spacing)
-        y_values = np.arange(min_y, max_y + self.dot_min_spacing, self.dot_min_spacing)
-        candidate_rows = []
-
-        for row_index, y in enumerate(y_values):
-            row_offset = self.dot_min_spacing * 0.5 if row_index % 2 else 0.0
-            row_x_values = x_values + row_offset
-            candidate_rows.append(
-                np.column_stack(
-                    [
-                        row_x_values,
-                        np.full_like(row_x_values, y, dtype=float),
-                        np.zeros_like(row_x_values, dtype=float),
-                    ]
-                )
-            )
-
-        candidate_points = np.vstack(candidate_rows)
-        home_positions = candidate_points[self._build_logo_dot_mask(candidate_points, edges, dot_radius)]
+        home_positions = self._build_randomized_logo_dot_positions(
+            polylines=polylines,
+            edges=edges,
+            min_x=min_x,
+            min_y=min_y,
+            max_x=max_x,
+            max_y=max_y,
+            radius=dot_radius,
+        )
 
         if not len(home_positions):
             raise ValueError("The rasterized logo did not produce any dots")
@@ -355,6 +348,82 @@ class LogoAnimation(Scene):
             dots.add(dot)
 
         return dots, home_positions, self.dot_min_spacing
+
+    def _build_randomized_logo_dot_positions(
+        self,
+        polylines: list[list[np.ndarray]],
+        edges: list[tuple[np.ndarray, np.ndarray]],
+        min_x: float,
+        min_y: float,
+        max_x: float,
+        max_y: float,
+        radius: float,
+    ) -> np.ndarray:
+        spacing = self.dot_min_spacing
+        spacing_squared = spacing * spacing
+        rng = np.random.default_rng(self.dot_random_seed)
+        estimated_area = self._estimate_polygon_area(polylines)
+        target_count = max(1, int(np.ceil(estimated_area * self.dot_random_target_fill_ratio / spacing_squared)))
+        batch_size = max(self.dot_field_chunk_size, target_count * 2)
+        accepted_points: list[np.ndarray] = []
+        occupancy: dict[tuple[int, int], list[np.ndarray]] = {}
+        rounds_without_growth = 0
+
+        def can_place(point: np.ndarray) -> bool:
+            grid_x = int(np.floor((point[0] - min_x) / spacing))
+            grid_y = int(np.floor((point[1] - min_y) / spacing))
+
+            for neighbor_x in range(grid_x - 1, grid_x + 2):
+                for neighbor_y in range(grid_y - 1, grid_y + 2):
+                    for other_point in occupancy.get((neighbor_x, neighbor_y), []):
+                        delta = point[:2] - other_point[:2]
+                        if float(np.dot(delta, delta)) < spacing_squared:
+                            return False
+
+            occupancy.setdefault((grid_x, grid_y), []).append(point)
+            return True
+
+        while len(accepted_points) < target_count and rounds_without_growth < self.dot_random_max_rounds:
+            candidate_points = np.column_stack(
+                [
+                    rng.uniform(min_x, max_x, batch_size),
+                    rng.uniform(min_y, max_y, batch_size),
+                    np.zeros(batch_size, dtype=float),
+                ]
+            )
+            valid_points = candidate_points[self._build_logo_dot_mask(candidate_points, edges, radius)]
+            starting_count = len(accepted_points)
+
+            for point in valid_points:
+                if can_place(point):
+                    accepted_points.append(point)
+                    if len(accepted_points) >= target_count:
+                        break
+
+            if len(accepted_points) == starting_count:
+                rounds_without_growth += 1
+            else:
+                rounds_without_growth = 0
+
+        if not accepted_points:
+            return np.zeros((0, 3), dtype=float)
+
+        positions = np.array(accepted_points, dtype=float)
+        sort_order = np.lexsort((positions[:, 1], positions[:, 0]))
+        return positions[sort_order]
+
+    def _estimate_polygon_area(self, polylines: list[list[np.ndarray]]) -> float:
+        total_area = 0.0
+        for polyline in polylines:
+            points = np.array([point[:2] for point in polyline], dtype=float)
+            if len(points) < 3:
+                continue
+
+            x = points[:, 0]
+            y = points[:, 1]
+            total_area += 0.5 * abs(np.dot(x[:-1], y[1:]) - np.dot(y[:-1], x[1:]))
+
+        return total_area
 
     def _build_logo_dot_mask(
         self,
